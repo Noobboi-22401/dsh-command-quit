@@ -1,0 +1,8 @@
+# dsh-command-quit -- DSH bundle patch
+#
+# Bundle mount declaration. DSH stacks each bundle patch layer at startup;
+# this layer inserts the Host-side plugin that owns the /quit-dsh command.
+
+- insert:
+    - id: command-quit
+      name: dsh-command-quit
