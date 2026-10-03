@@ -1,0 +1,52 @@
+#!/bin/sh
+# Terminal launcher for the dsh-command-quit plugin, for POSIX shells.
+#
+# A shell that does not consult PATHEXT — Git Bash and its relatives — finds the
+# extension-less shim the plugin installs rather than the .cmd next to it, and
+# that shim execs this file. The Node.js search mirrors bin/dsh-quit.cmd.
+#
+# Everything the user reads is printed by Node.js itself, so this file never has
+# to get encoding right.
+
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 1
+entry="$here/dsh-quit.mjs"
+
+if [ ! -f "$entry" ]; then
+  echo "The dsh-command-quit plugin is incomplete: bin/dsh-quit.mjs is missing." >&2
+  echo "Download the whole plugin folder, not just one file." >&2
+  exit 1
+fi
+
+# Run one candidate, passing the script's own arguments through.
+launch() {
+  cmd=$1
+  shift
+  if [ -n "$cmd" ] && [ -x "$cmd" ]; then
+    exec "$cmd" "$entry" "$@"
+  fi
+  return 1
+}
+
+launch "$DSH_QUIT_NODE" "$@"
+
+if command -v node >/dev/null 2>&1; then
+  launch "$(command -v node)" "$@"
+fi
+
+for candidate in "$HOME"/.dsh/dsh-runtimes/*/dependencies/node/bin/node; do
+  launch "$candidate" "$@"
+done
+
+# A desktop install that ships its own Node.js runtime, run as Node.js.
+for exe in \
+  "$LOCALAPPDATA/Programs/DeepSeek Harness/DeepSeek Harness.exe" \
+  "$LOCALAPPDATA/DeepSeek Harness/DeepSeek Harness.exe" \
+  "/c/Program Files/DeepSeek Harness/DeepSeek Harness.exe"; do
+  if [ -f "$exe" ]; then
+    ELECTRON_RUN_AS_NODE=1 exec "$exe" "$entry" "$@"
+  fi
+done
+
+echo "This command needs Node.js and could not find one." >&2
+echo "Install Node.js 18 or newer from https://nodejs.org, then run it again." >&2
+exit 1

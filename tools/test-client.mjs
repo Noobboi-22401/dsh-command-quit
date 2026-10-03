@@ -53,14 +53,24 @@ const dicts = {}
 const t = (key) => dicts.commandQuit?.[key] ?? key
 
 /** Stub UI primitives: the real ones need a browser, the card only names them. */
+const formModels = []
 const primitives = {
   SettingsForm: function SettingsForm() {},
   SettingsValueField: function SettingsValueField() {},
-  settingsTextField: (field) => ({ field }),
+  Switch: function Switch() {},
+  settingsTextField: (field) => ({
+    field,
+    format: (value) => (typeof value === 'string' ? value : ''),
+    parse: (text) => {
+      const trimmed = String(text).trim()
+      return trimmed === '' ? { kind: 'clear' } : { kind: 'set', value: trimmed }
+    }
+  }),
   SettingsFormModel: class {
     constructor(scope, specs) {
       this.scope = scope
       this.specs = specs
+      formModels.push(this)
     }
     bind(project) {
       return { getSnapshot: () => project(), subscribe: () => () => {} }
@@ -219,11 +229,11 @@ hostNotice = ''
 check('clearing the notice moves the snapshot back', reader.getSnapshot() !== loudSnapshot)
 check('and the cleared snapshot is stable too', reader.getSnapshot() === reader.getSnapshot())
 
-/** Flatten an element tree, expanding the one locally defined component. */
+/** Flatten an element tree, expanding the components defined inside the bundle. */
 function collect(node, out = []) {
   if (node === null || node === undefined || typeof node !== 'object') return out
   out.push(node)
-  if (typeof node.type === 'function' && node.type.name === 'PresetChip') {
+  if (typeof node.type === 'function' && (node.type.name === 'PresetChip' || node.type.name === 'ToggleControl')) {
     collect(node.type(node.props), out)
     return out
   }
@@ -273,9 +283,85 @@ for (const failed of [false, true]) {
     String(field?.props?.hint?.slice(0, 24))
   )
   const chips = nodes.filter((node) => node.props?.className === 'cqchip' || node.props?.className === 'cqchip cqchipActive')
-  check(`four preset chips render (refused=${failed})`, chips.length === 4, String(chips.length))
+  check(`four presets per name field render (refused=${failed})`, chips.length === 8, String(chips.length))
+  check(`the terminal presets carry no slash (refused=${failed})`,
+    chips.filter((node) => String(node.children?.[0]).startsWith('/')).length === 4,
+    JSON.stringify(chips.map((node) => node.children?.[0])))
   check(`no shadow warning without a conflict (refused=${failed})`, shadowOf(render(failed)) === undefined, 'none')
 }
+
+// ---------------------------------------------------------------------------
+// The terminal section: two switches, a second name field and a status line.
+// ---------------------------------------------------------------------------
+const terminalState = {
+  shell: { available: true, writable: true, dirty: false, invalid: false, saving: false, failed: false },
+  field: { text: 'quit-dsh', overridden: false, invalid: false },
+  fields: {
+    enabled: { text: 'true', overridden: false, invalid: false },
+    confirm: { text: 'true', overridden: false, invalid: false },
+    name: { text: 'quit-dsh', overridden: false, invalid: false }
+  },
+  notice: undefined,
+  terminal: undefined
+}
+const renderTerminal = (terminal, fields, extra) =>
+  collect(
+    component({
+      t,
+      view: 'page',
+      useCommandQuitCard: (selector) => selector({ ...terminalState, fields: { ...terminalState.fields, ...fields }, terminal, ...extra }),
+      edit: () => {},
+      resetField: () => {},
+      save: () => {},
+      discard: () => {}
+    })
+  )
+
+const section = renderTerminal().find((node) => node.props?.className === 'cqsection')
+check('the page carries a terminal section', section !== undefined, String(section?.props?.className))
+check('the section is titled from the dictionary', String(renderTerminal().find((n) => n.props?.className === 'cqsectionTitle')?.children?.[0]) === '终端命令', 'title')
+const switches = renderTerminal().filter((node) => node.type === primitives.Switch)
+check('the section renders two switches', switches.length === 2, String(switches.length))
+check('both switches start on', switches.every((node) => node.props.checked === true), JSON.stringify(switches.map((n) => n.props.checked)))
+check('both switches are labelled', switches.every((node) => typeof node.props.label === 'string' && node.props.label.length > 0), JSON.stringify(switches.map((n) => n.props.label)))
+check('no switch is locked while the deployment is writable', switches.every((node) => node.props.disabled === false), JSON.stringify(switches.map((n) => n.props.disabled)))
+
+const offSwitches = renderTerminal(undefined, { enabled: { text: 'false', overridden: true, invalid: false } }).filter((node) => node.type === primitives.Switch)
+check('the confirmation switch is locked while the feature is off', offSwitches[1]?.props.disabled === true, JSON.stringify(offSwitches.map((n) => n.props.disabled)))
+check('the locked switch explains why', offSwitches[1]?.props.title?.includes('不生效') === true, String(offSwitches[1]?.props.title))
+check('the row it sits in is dimmed', renderTerminal(undefined, { enabled: { text: 'false', overridden: true, invalid: false } }).some((node) => node.props?.className === 'cqrow cqrowOff'), 'cqrowOff')
+
+// Every state the Host can publish has copy, and only the bad ones are alarms.
+const statusCases = [
+  ['installed', { kind: 'terminal', state: 'installed', dir: 'D:\\Main\\resources\\runtime\\cli\\bin', onPath: true }, '已安装：', false],
+  ['not on PATH', { kind: 'terminal', state: 'installed', dir: 'D:\\x', onPath: false }, 'PATH', false],
+  ['missing', { kind: 'terminal', state: 'missing' }, 'install-dsh-quit.cmd', false],
+  ['disabled', { kind: 'terminal', state: 'disabled' }, '已关闭', false],
+  ['conflict', { kind: 'terminal', state: 'conflict', detail: '已被占用' }, '已被占用', true],
+  ['error', { kind: 'terminal', state: 'error', detail: '管道失败' }, '管道失败', true]
+]
+for (const [label, status, needle, alarm] of statusCases) {
+  const node = renderTerminal(status).find((n) => n.props?.className === 'cqstatus' || n.props?.className === 'cqstatus cqstatusBad')
+  check(`the ${label} status is shown`, node !== undefined && String(node.children?.[0]).includes(needle), String(node?.children?.[0]))
+  check(`the ${label} status alarm flag is ${alarm}`, (node?.props?.className === 'cqstatus cqstatusBad') === alarm, String(node?.props?.className))
+}
+check('a status kind nobody knows renders nothing',
+  renderTerminal({ kind: 'terminal', state: 'nonsense' }).find((n) => n.props?.className?.startsWith('cqstatus')) === undefined, 'none')
+check('a status of another kind is ignored',
+  renderTerminal({ kind: 'shadowed' }).find((n) => n.props?.className?.startsWith('cqstatus')) === undefined, 'none')
+
+// The form model must know all four fields, and the switches must speak true/false.
+const specs = formModels[0]?.specs ?? []
+check('the form declares all four fields', JSON.stringify(specs.map((spec) => spec.field)) === JSON.stringify(['commandName', 'terminalEnabled', 'terminalConfirm', 'terminalName']), JSON.stringify(specs.map((spec) => spec.field)))
+const enabledSpec = specs.find((spec) => spec.field === 'terminalEnabled')
+check('an absent switch value formats as on', enabledSpec?.format(undefined) === 'true', String(enabledSpec?.format(undefined)))
+check('a switch value of false formats as off', enabledSpec?.format(false) === 'false', String(enabledSpec?.format(false)))
+check('a switch parses true', JSON.stringify(enabledSpec?.parse('true')) === JSON.stringify({ kind: 'set', value: true }), JSON.stringify(enabledSpec?.parse('true')))
+check('a switch parses false', JSON.stringify(enabledSpec?.parse('false')) === JSON.stringify({ kind: 'set', value: false }), JSON.stringify(enabledSpec?.parse('false')))
+check('a switch refuses anything else', enabledSpec?.parse('maybe') === undefined, String(enabledSpec?.parse('maybe')))
+check('the two switches share one spec shape',
+  specs.find((spec) => spec.field === 'terminalConfirm')?.parse('false')?.value === false, 'confirm')
+check('the terminal name field is a text field', specs.find((spec) => spec.field === 'terminalName')?.parse('  dshq  ')?.value === 'dshq', 'text')
 
 // ---------------------------------------------------------------------------
 // The page's own conflict warning.

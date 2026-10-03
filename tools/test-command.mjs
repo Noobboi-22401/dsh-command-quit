@@ -118,6 +118,17 @@ if (vendor.root !== '') registerHooks(makeVendorHook(vendor.files))
 const childSource = `
 import { pathToFileURL } from 'node:url'
 import { registerHooks } from 'node:module'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+
+// The terminal half of the plugin keeps its state under the user's home unless
+// it is told otherwise, and would otherwise start a real listener here. Both
+// are redirected into a scratch directory, and the transport is pinned to the
+// loopback fallback because a confined environment cannot create a named pipe.
+process.env.DSH_COMMAND_QUIT_STATE = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-quit-cmd-state-'))
+process.env.DSH_COMMAND_QUIT_TRANSPORT = 'tcp'
+const stateDir = process.env.DSH_COMMAND_QUIT_STATE
 
 const [pluginPath, scenarioJson, filesJson] = process.argv.slice(2)
 const scenario = JSON.parse(scenarioJson)
@@ -222,9 +233,17 @@ const ctx = {
 }
 
 let currentNotice = scenario.notice === undefined ? '' : scenario.notice
+let currentTerminalName = scenario.terminalName === undefined ? 'quit-dsh' : scenario.terminalName
+let currentTerminalEnabled = scenario.terminalEnabled === undefined ? true : scenario.terminalEnabled
 const config = {
   commandName: {
     get: () => currentName
+  },
+  terminalName: {
+    get: () => currentTerminalName
+  },
+  terminalEnabled: {
+    get: () => currentTerminalEnabled
   },
   notice: {
     get: () => currentNotice
@@ -250,6 +269,7 @@ if (definitionOfCurrent !== undefined) {
 const report = {
   name: plugin.name,
   inject: plugin.inject,
+  stateDir,
   command,
   registrations: [...registered.keys()],
   description: definitionOfCurrent === undefined ? undefined : definitionOfCurrent.description,
@@ -331,7 +351,15 @@ fs.writeFileSync(childPath, childSource)
 
 function run(scenario) {
   return new Promise((resolve, reject) => {
-    const child = fork(childPath, [pluginPath, JSON.stringify(scenario), JSON.stringify(vendor.files)], { stdio: ['ignore', 'inherit', 'inherit', 'ipc'] })
+    // `pathPrefix` lets one scenario put a directory in front of the child's
+    // PATH, which is how a name that collides with someone else's command is
+    // reproduced without depending on what happens to be installed.
+    const env = { ...process.env }
+    if (typeof scenario.pathPrefix === 'string' && scenario.pathPrefix.length > 0) {
+      env.PATH = scenario.pathPrefix + path.delimiter + (env.PATH ?? '')
+      env.Path = env.PATH
+    }
+    const child = fork(childPath, [pluginPath, JSON.stringify(scenario), JSON.stringify(vendor.files)], { stdio: ['ignore', 'inherit', 'inherit', 'ipc'], env })
     const messages = []
     child.on('message', (message) => messages.push(message))
     child.on('error', reject)
@@ -469,8 +497,11 @@ check('every notice goes to this plugin own settings entry',
 
 const quiet = await run({ name: 'qd' })
 const quietReport = quiet.messages.find((m) => m && m.command !== undefined)
-check('no notice is written while the configured name is in force',
-  (quietReport?.notices ?? []).length === 0, JSON.stringify(quietReport?.notices))
+// Only the shadow notice is meant to be silent here; the terminal feature
+// publishes its own status through a different field of the same entry.
+check('no shadow notice is written while the configured name is in force',
+  (quietReport?.notices ?? []).filter((entry) => entry.patch?.notice !== undefined && entry.patch.notice !== '').length === 0,
+  JSON.stringify(quietReport?.notices))
 
 // A rival that appears only once a session exists: the save could not see it.
 const late = await run({
@@ -607,6 +638,112 @@ check(
 )
 check('encodeNotice round-trips a shadow notice', JSON.parse(helpers.encodeNotice({ kind: 'shadowed' })).kind === 'shadowed', helpers.encodeNotice({ kind: 'shadowed' }))
 check('encodeNotice clears the notice for nothing', helpers.encodeNotice(undefined) === '', JSON.stringify(helpers.encodeNotice(undefined)))
+
+// ---------------------------------------------------------------------------
+// The terminal feature's own configuration
+// ---------------------------------------------------------------------------
+check('config declares the terminal switch', helpers.Config?.dict?.terminalEnabled?.meta?.volatile === true && helpers.Config.dict.terminalEnabled.meta.default === true, JSON.stringify(helpers.Config?.dict?.terminalEnabled?.meta))
+check('config declares the confirmation switch', helpers.Config?.dict?.terminalConfirm?.meta?.volatile === true && helpers.Config.dict.terminalConfirm.meta.default === true, JSON.stringify(helpers.Config?.dict?.terminalConfirm?.meta))
+check('config declares the terminal command name', helpers.Config?.dict?.terminalName?.meta?.volatile === true && helpers.Config.dict.terminalName.meta.default === 'quit-dsh', JSON.stringify(helpers.Config?.dict?.terminalName?.meta))
+check('config declares the terminal status field', helpers.Config?.dict?.terminalNotice?.meta?.volatile === true && helpers.Config.dict.terminalNotice.meta.default === '', JSON.stringify(helpers.Config?.dict?.terminalNotice?.meta))
+check('terminal name presets', JSON.stringify(helpers.PRESET_TERMINAL_NAMES) === '["quit-dsh","dsh-quit","dshq","dsq"]', JSON.stringify(helpers.PRESET_TERMINAL_NAMES))
+check('terminal name default constant', helpers.DEFAULT_TERMINAL_NAME === 'quit-dsh', helpers.DEFAULT_TERMINAL_NAME)
+check('the terminal default matches the composer default', helpers.DEFAULT_TERMINAL_NAME === helpers.DEFAULT_COMMAND_NAME, `${helpers.DEFAULT_TERMINAL_NAME}/${helpers.DEFAULT_COMMAND_NAME}`)
+check('terminal status notice kind', helpers.NOTICE_TERMINAL === 'terminal', helpers.NOTICE_TERMINAL)
+
+// Every field falls back to "on and asking", which is the safe direction for a
+// configuration that lost a field.
+check(
+  'an empty configuration keeps the terminal command on and asking',
+  JSON.stringify(helpers.resolveTerminalConfig({})) === JSON.stringify({ enabled: true, confirm: true, name: 'quit-dsh' }),
+  JSON.stringify(helpers.resolveTerminalConfig({}))
+)
+check(
+  'a switch read as false turns the feature off',
+  helpers.resolveTerminalConfig({ terminalEnabled: { get: () => false } }).enabled === false,
+  'enabled'
+)
+check(
+  'a confirmation read as false is honoured',
+  helpers.resolveTerminalConfig({ terminalConfirm: { get: () => false } }).confirm === false,
+  'confirm'
+)
+check(
+  'an illegal terminal name falls back to the default and is reported',
+  (() => {
+    const resolved = helpers.resolveTerminalConfig({ terminalName: { get: () => 'Bad!' } })
+    return resolved.name === 'quit-dsh' && resolved.refused === 'Bad!'
+  })(),
+  JSON.stringify(helpers.resolveTerminalConfig({ terminalName: { get: () => 'Bad!' } }))
+)
+check(
+  'a legal terminal name is used as configured',
+  helpers.resolveTerminalConfig({ terminalName: { get: () => 'dshq' } }).name === 'dshq',
+  'dshq'
+)
+
+function terminalNameRefused(candidate) {
+  try {
+    helpers.checkCandidateTerminalName(candidate)
+    return false
+  } catch {
+    return true
+  }
+}
+check('the save check refuses an illegal terminal name', terminalNameRefused({ terminalName: 'Bad!' }) === true, 'Bad!')
+check('the save check refuses a reserved terminal name', terminalNameRefused({ terminalName: 'con' }) === true, 'con')
+check('the save check accepts the default terminal name', terminalNameRefused({ terminalName: 'quit-dsh' }) === false, 'quit-dsh')
+check('the save check skips an unchanged empty name', terminalNameRefused({}) === false, 'no name')
+check('the save check stands down while the feature is off', terminalNameRefused({ terminalName: 'Bad!', terminalEnabled: false }) === false, 'off')
+
+// A save that only moves the terminal name is checked, and one that leaves it
+// alone is not: this plugin writes its own status fields through the same
+// document, and re-checking those would refuse a status update.
+const terminalGuard = await run({ guard: { terminalName: 'Bad!' } })
+const terminalGuardReport = terminalGuard.messages.find((m) => m && m.guardCount !== undefined)
+check('save guard blocks an illegal terminal name', terminalGuardReport?.guardVerdict === 'blocked', String(terminalGuardReport?.guardMessage))
+const terminalFree = await run({ guard: { terminalName: 'quit-dsh' } })
+const terminalFreeReport = terminalFree.messages.find((m) => m && m.guardCount !== undefined)
+check('save guard accepts the default terminal name', terminalFreeReport?.guardVerdict === 'accepted', String(terminalFreeReport?.guardMessage))
+const terminalUnchanged = await run({ terminalName: 'quit-dsh', guard: { terminalName: 'quit-dsh' } })
+const terminalUnchangedReport = terminalUnchanged.messages.find((m) => m && m.guardCount !== undefined)
+check('save guard passes an unchanged terminal name through', terminalUnchangedReport?.guardVerdict === 'accepted', String(terminalUnchangedReport?.guardMessage))
+// A name saved while the feature was off was let through on purpose, so the save
+// that switches the feature on is the last chance to catch it. The case that
+// matters is a name that never moved: an illegal one is caught by the "the name
+// changed" rule alone, while a legal name that belongs to another command on the
+// PATH is what only this second look can find.
+const collisionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-quit-collide-'))
+fs.writeFileSync(path.join(collisionDir, 'quit-dsh.ps1'), '# someone else command\n')
+const terminalTurnedOn = await run({ terminalEnabled: false, pathPrefix: collisionDir, guard: { terminalName: 'quit-dsh', terminalEnabled: true } })
+const terminalTurnedOnReport = terminalTurnedOn.messages.find((m) => m && m.guardCount !== undefined)
+check(
+  'save guard checks an unchanged name when the save switches the feature on',
+  terminalTurnedOnReport?.guardVerdict === 'blocked',
+  String(terminalTurnedOnReport?.guardMessage)
+)
+check(
+  'the refusal caused by the switch names the colliding file',
+  String(terminalTurnedOnReport?.guardMessage).includes('quit-dsh.ps1'),
+  String(terminalTurnedOnReport?.guardMessage)
+)
+// Staying off is still allowed to carry any name: nothing is installed while the
+// feature is off, and the save that turns it on is the one that checks.
+const terminalKeptOff = await run({ terminalEnabled: false, pathPrefix: collisionDir, guard: { terminalName: 'quit-dsh', terminalEnabled: false } })
+const terminalKeptOffReport = terminalKeptOff.messages.find((m) => m && m.guardCount !== undefined)
+check('a save that keeps the feature off still lets the name through', terminalKeptOffReport?.guardVerdict === 'accepted', String(terminalKeptOffReport?.guardMessage))
+fs.rmSync(collisionDir, { recursive: true, force: true })
+
+// Every child redirected the terminal half's state into its own scratch
+// directory; clean those up rather than leaving them in the temporary folder.
+const childStates = new Set()
+for (const run of [desktop, web, custom, conflict, terminalGuard, terminalFree, terminalUnchanged, terminalTurnedOn, terminalKeptOff]) {
+  for (const message of run.messages) {
+    if (typeof message?.stateDir === 'string') childStates.add(message.stateDir)
+  }
+}
+check('every child redirected its terminal state out of the user home', childStates.size === 9, String(childStates.size))
+for (const dir of childStates) fs.rmSync(dir, { recursive: true, force: true })
 
 fs.rmSync(path.dirname(childPath), { recursive: true, force: true })
 if (vendor.root !== '') fs.rmSync(vendor.root, { recursive: true, force: true })

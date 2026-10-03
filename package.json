@@ -1,12 +1,13 @@
 {
   "name": "dsh-command-quit",
-  "version": "1.1.0",
-  "description": "DSH slash command that closes the DeepSeek Harness desktop client, with a configurable command name",
+  "version": "1.2.2",
+  "description": "DSH command that closes the DeepSeek Harness desktop client, from the composer or from a terminal, with configurable names and confirmation",
   "keywords": [
     "dsh",
     "dsh-plugin",
     "deepseek-harness",
     "slash-command",
+    "terminal-command",
     "quit"
   ],
   "type": "module",
@@ -22,9 +23,12 @@
   },
   "files": [
     "lib",
+    "bin",
     "tools",
     "cordis.patch.yml",
     "fix-quit.cmd",
+    "install-dsh-quit.cmd",
+    "uninstall-dsh-quit.cmd",
     "README.md",
     "README_en.md",
     "LICENSE"

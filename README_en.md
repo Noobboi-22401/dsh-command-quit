@@ -4,7 +4,7 @@
 
 **Plugin name**: `dsh-command-quit`
 
-Adds a slash command to the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) desktop client that closes the client. **The command name is configurable**; the default is `/quit-dsh`.
+Adds two ways to close the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) desktop client: the slash command `/quit-dsh` in the conversation box, and **`quit-dsh` in any terminal window**. **Both names are configurable**, and the terminal command can be set to ask before it quits.
 
 **Disclosure**: **This plugin was written entirely by DeepSeek V4.1 Flash (including this README file itself). The uploader only ran basic functional tests and did not review the code line by line**, so unknown bugs may exist.
 
@@ -12,9 +12,11 @@ Adds a slash command to the [DeepSeek Harness](https://github.com/deepseek-ai/de
 
 ## Features
 
-Type `/quit-dsh` in the DSH conversation box and press Enter to **close the DeepSeek Harness desktop client**.
+**1. Composer command**: type `/quit-dsh` in the DSH conversation box and press Enter to **close the DeepSeek Harness desktop client**.
 
-It goes through the application's native quit flow: if a task is still running at that moment, a confirmation dialog appears instead of the process being killed outright.
+**2. Terminal command**: type `quit-dsh` in any terminal window (PowerShell, cmd, Windows Terminal or Git Bash) and press Enter to close the client too — by default after one question, "确认退出吗 [y/N]", which only `y` answers.
+
+Both go through the **same native quit flow**: if a task is still running at that moment, a confirmation dialog appears instead of the process being killed outright. **Nothing is force-killed and nothing is lost.**
 
 ## Usage
 
@@ -48,6 +50,71 @@ Open the **Plugins** page from the left sidebar of the DSH interface (the "Plugi
 
 > The configuration is kept by DSH itself and written into the current profile's `cordis.patch.yml`; **no** separate configuration file appears in the plugin directory. The conflict notice above is written into that same configuration entry as a `notice` field (it appears only when such a conflict has actually happened, and is empty otherwise); it is cleared automatically once you switch back to a usable name on the configuration page.
 
+
+## The terminal command `quit-dsh`
+
+### Install it once
+
+1. Open the plugin folder and double-click **`install-dsh-quit.cmd`**.
+2. Wait for "安装完成", then close that window.
+3. **Open a new terminal** (an already-open one does not know the new command yet) and type `quit-dsh`.
+
+Installing does exactly one thing: it writes two tiny files into **the command directory DSH already keeps on your PATH** — the directory that holds `dsh.cmd`. It **does not modify the client's files and needs no administrator rights**, and it can run while the client is open.
+
+### What it looks like
+
+```text
+> quit-dsh
+即将关闭 DeepSeek Harness 客户端。
+（如果客户端里还有任务在跑，关的时候它自己还会再弹一次确认框。）
+
+确认退出吗？ [y/N] y
+正在请求关闭 DeepSeek Harness 客户端…
+已发送退出请求，客户端正在关闭。
+```
+
+- **Enter alone means no.** Only `y`, `yes` or `是` are read as consent, so a stray Enter cannot close a running client.
+- With no client running it says so plainly instead of failing silently.
+- **Two confirmations are deliberate**: the terminal one is the first; the client's own "a task is running, quit anyway?" is DSH's second, which this plugin neither can nor tries to bypass — that is exactly why it quits cleanly.
+- With several clients running, one invocation asks all of them to quit.
+
+### Options
+
+| Command | Effect |
+|---|---|
+| `quit-dsh` | Ask first; `y` quits (the default) |
+| `quit-dsh --yes` | Do not ask; quit immediately (for scripts and shortcuts) |
+| `quit-dsh --list` | List the running clients without quitting |
+| `quit-dsh --help` | Show the usage text |
+
+> The name printed by `--help` and by every other message is the one you actually installed: rename the terminal command to `dshq` and the messages say `dshq` — the default is never written in stone.
+
+### What the settings page controls
+
+Open the **Plugins** page in DSH and find **Quit command**; the "Terminal command" section holds:
+
+| Control | Default | Meaning |
+|---|---|---|
+| **Enable the terminal quit command** | on | When off, `quit-dsh` will not close the client — it only says the feature is off. **The installed launcher is kept**, so turning it back on needs no reinstall. |
+| **Ask for confirmation first (y/N)** | on | When off, `quit-dsh` quits immediately without asking. This one is greyed out while the switch above is off. |
+| **Terminal command name** | `quit-dsh` | Any legal name (presets: `quit-dsh`, `dsh-quit`, `dshq`, `dsq`). **Saving a new name renames the installed launcher automatically** — no reinstall. |
+| **The status line** | — | Says whether it is installed, where, and whether the name is taken. |
+
+After a rename, **a terminal that is already open must be reopened**: shells cache the commands they found on PATH.
+
+### When the name is taken
+
+If the name is already used by another file on the PATH (say `dshq.ps1` in some directory), **the save is refused**, the field turns red and the occupying files are listed — a shell resolves a command against the whole PATH, so a collision would silently run someone else's program. Windows reserved device names (`con`, `nul`, `com1`, …) are refused too.
+
+### Uninstall
+
+Double-click **`uninstall-dsh-quit.cmd`**. It deletes only the two files carrying **this plugin's own marker**; a file of the same name that you created yourself is never touched, and the client's `/quit-dsh` is unaffected.
+
+### How it manages a clean quit
+
+The terminal's `quit-dsh` and the plugin are **two different processes**: the client's internal "please quit" channel is only reachable from the plugin's child process. So while the client runs, the plugin listens on a **local-only** endpoint — a Windows named pipe when available, a `127.0.0.1` loopback port otherwise, with the server rejecting any connection whose peer is not this machine. The endpoint name is not a secret, so a per-process random token (64 hex characters) guards it, stored under your own `~/.dsh-command-quit/`. The terminal command reads the endpoint and the token, connects, and asks the plugin to quit; the plugin then does **exactly what `/quit-dsh` does**.
+
+A wrong token is refused explicitly. Somebody without the token cannot close your client.
 
 ## Installation
 
@@ -123,6 +190,31 @@ node tools\verify-shell.mjs
 
 For non-technical users: double-click `fix-quit.cmd`. It first confirms that the client is closed (its files cannot be changed while the client is running), then runs everything automatically and prints a Chinese conclusion. The launcher looks for a system-installed Node.js first, falls back to the Node bundled with DeepSeek Harness, and only if neither exists does it ask you to install one.
 
+## Upgrading the plugin (1.1.0 → 1.2.2)
+
+If you already run an older version, the upgrade has three steps — **the terminal command is new in 1.2.x, so replacing the plugin files alone is not enough.**
+
+1. **Replace the plugin itself.** Use `plugin_manager` to remove it, then install the latest version (re-installing in place can return `ambiguous-install`; removing first avoids that):
+
+   ```
+   remove_bundle  dsh-command-quit
+   install_bundle github:Noobboi-22401/dsh-command-quit
+   ```
+
+2. **Install the terminal command once.** Open the plugin folder and double-click **`install-dsh-quit.cmd`**.
+
+3. **Restart the client.** Afterwards `/quit-dsh` works as before, and the terminal gains a `quit-dsh` command.
+
+> If you already installed the terminal command earlier (say, a test build), **do not delete anything by hand**: the plugin recognises the launcher files it wrote by their *generation* and replaces an older one automatically.
+
+### What 1.2.2 changes
+
+- **A terminal command**: type `quit-dsh` in any terminal window to close the client through exactly the same clean shutdown path as `/quit-dsh` — never a forced kill.
+- **A configurable name**: `quit-dsh` by default; renaming it renames the installed launcher automatically, with no reinstall.
+- **One question before it quits**: on by default, and only `y` proceeds; it can be switched off to quit straight away.
+- **Messages follow the name you actually use**: rename the command to `dshq` and `--help` and every other message say `dshq` instead of a hard-coded default.
+- **Older launcher files upgrade themselves**: the plugin recognises the files it wrote by generation and rewrites a stale one automatically.
+
 ## After a client upgrade
 
 An upgrade replaces `app.asar`, so the shell patch is lost with it. The plugin itself is unaffected: the command then returns a clear error message instead of crashing or failing silently.
@@ -157,6 +249,9 @@ The scripts under `tools/` contain **no hard-coded absolute paths**. They locate
 | `DSH_DESKTOP_RESOURCES` | the `resources` directory inside the installation |
 | `DSH_PROFILE_DIR` | the DSH profile directory |
 | `DSH_HOME` | the DSH home directory (default `~/.dsh`) |
+| `DSH_COMMAND_DIR` | where the terminal command is installed (default: the directory holding `dsh.cmd`, found automatically) |
+| `DSH_COMMAND_QUIT_STATE` | the terminal feature's state directory (default `~/.dsh-command-quit`) |
+| `DSH_COMMAND_QUIT_TRANSPORT` | force the relay transport: `pipe` (named pipe) / `tcp` (loopback port) / `auto` (default) |
 
 If none is set, the scripts search the conventional install locations (`%LOCALAPPDATA%\Programs\DeepSeek Harness\resources` and so on); when nothing is found they report a clear error telling you which variable to set.
 
@@ -178,17 +273,30 @@ dsh-command-quit/
 ├── .gitignore              # ignores node_modules, patch backups, etc.
 ├── lib/
 │   ├── index.js            # plugin core (Host half): command registration, command-name validation, save interception and runtime re-check
-│   └── client.js           # browser half: plugin configuration page (presets / custom / save) + conflict notices (in-page red text and bottom banner)
+│   ├── client.js           # browser half: plugin configuration page (two names + two switches) + conflict notices
+│   ├── terminal-state.js   # on-disk state of the terminal feature: instance records and the settings snapshot
+│   ├── quit-channel.js     # the local relay: named pipe / loopback port + random token
+│   ├── terminal-install.js # PATH scanning, launcher install / rename / removal
+│   ├── terminal-quit.js    # Host-half life cycle of the terminal feature (listen, publish, auto-sync)
+│   └── quit-cli.js         # the terminal command itself: ask, decide, request, print
+├── bin/
+│   ├── dsh-quit.mjs        # terminal command entry point (called by the two launchers below)
+│   ├── dsh-quit.cmd        # Windows launcher (locates Node.js)
+│   └── dsh-quit            # POSIX launcher (Git Bash and friends)
 ├── tools/
 │   ├── dsh-paths.mjs       # shared path resolution (environment variables / conventional install locations)
 │   ├── patch-asar.mjs      # applies the equal-length shell patch to app.asar
 │   ├── unpatch-asar.mjs    # restores the shell from the backup
 │   ├── verify-shell.mjs    # behaviour-sampling test for the shell patch
 │   ├── profile-check.mjs   # verifies that the profile composes this plugin correctly
-│   ├── test-command.mjs    # end-to-end IPC test of the command + command-name configuration tests (Host half)
+│   ├── install-dsh-quit.mjs # installs / removes the terminal command (Chinese-message layer)
+│   ├── test-command.mjs    # end-to-end IPC test of the command + configuration tests for both names (Host half)
 │   ├── test-client.mjs     # structural test of the configuration page (browser half)
+│   ├── test-terminal.mjs   # end-to-end test of the terminal command (relay, question, launcher files)
 │   └── fix-desktop-quit.mjs # Chinese-message layer of the one-click repair
-├── fix-quit.cmd            # Windows double-click entry point (locates Node automatically: system first, then the one bundled with DSH)
+├── fix-quit.cmd            # Windows double-click entry point: repair the shell patch (locates Node automatically: system first, then the one bundled with DSH)
+├── install-dsh-quit.cmd    # Windows double-click entry point: install the terminal command
+├── uninstall-dsh-quit.cmd  # Windows double-click entry point: remove the terminal command
 ├── README.md
 ├── README_en.md
 └── LICENSE
@@ -208,6 +316,10 @@ dsh-command-quit/
 - **The contract for reading state on the configuration page**: DSH uses React's `useSyncExternalStore` to turn the data source in "slot injection" into component props, and that channel requires `getSnapshot()` to **return the same object whenever the data has not changed**. As long as two consecutive reads differ by reference, React re-renders endlessly and eventually drags the plugin page down along with the settings page; the symptom is **the configuration menu refusing to open or showing a blank page, with no error on the page at all**. The card in this plugin therefore uses the form's own binding (`SettingsFormModel.bind`, the same approach as the official settings pages) as its data source, wrapped in a structural-comparison cache, giving two guarantees that reads are stable; `tools/test-client.mjs` contains a dedicated regression check watching for this.
 - **Node.js**: `>=18` (the build artifacts use ESM, top-level await and `node:`-prefixed imports). The double-click entry point `fix-quit.cmd` first looks for `node.exe` on the system `PATH` (and actually runs it once to confirm it works); if it is not found it automatically falls back to the Node bundled with DeepSeek Harness (located via `DSH_HOME`, `DSH_APP_ASAR` and the conventional install locations), so **a machine without a separately installed Node.js can still use it by double-clicking**.
 - **Host shape**: the command can only really quit inside a desktop client that has the quit channel. Executing it in a pure Web / server-side Host returns a clear error message rather than failing silently.
+- **The terminal command's relay**: a Windows named pipe is preferred (the operating system never exposes it to the network), falling back automatically to a `127.0.0.1` loopback port where creating a pipe is not permitted. In loopback mode the server checks the peer address and drops anything that is not this machine; both modes require the per-process random token from the instance record, compared in constant time so the comparison leaks nothing. While the feature is off **nothing is listening at all**: "off" means no socket, not a refused request.
+- **The terminal command's launcher files**: installed into the directory DSH already keeps on PATH (the one holding `dsh.cmd`). On Windows both `<name>.cmd` (for cmd / PowerShell / Windows Terminal) and the extension-less `<name>` (for Git Bash and similar shells) are written; on macOS / Linux the extension-less one. Both carry this plugin's marker, and renaming or uninstalling **touches only marked files**. The launcher in `bin\` tries, in order: the Node recorded at install time, then `node.exe` on PATH (actually run once to confirm it works), then the Node bundled with DSH — so a machine without a separately installed Node.js still works.
+- **The terminal command's collision check**: both saving and installing scan **the whole PATH**, counting `<name>` plus every `.cmd`, `.bat`, `.exe`, `.ps1`, `.com` and `.vbs` spelling, and letting through only files carrying this plugin's marker. Windows reserved device names (`con`, `nul`, `com1`, …) are refused as well.
+- **How the terminal command and the configuration page stay in step**: the plugin publishes its status into the `terminalNotice` field of its own configuration entry, and the browser half renders it as the status line from the settings-update event DSH forwards. On a DSH build that does not forward that event the worst case is a status line that does not refresh, and **the command itself keeps working**. Renaming and both switches take effect immediately, with no client restart.
 
 ## Notes
 
@@ -218,6 +330,9 @@ dsh-command-quit/
 - **Command-name collisions are intercepted "at save time".** The check happens before the configuration is written: a collision rejects the save outright, the panel shows red text, the configuration is not written and the command is not switched. To verify this, try one of DSH's own names (such as `compact`): the collision is refused at the moment you press save.
 - **Collisions that cannot be detected at save time are caught and reported at runtime.** If another plugin registers a command of the same name only after a particular session starts, it is invisible at the moment of saving; the plugin re-checks whenever the command table changes, and once covered it switches back to `/quit-dsh` automatically and explains why in **red text on the configuration page** and in a **banner at the bottom of the interface**. This notice has to travel through DSH's settings push to appear, so **after restarting the client** an ongoing conflict shows up again.
 - Known leftover issue: running `install_bundle` again for an **already existing** local path dependency may make `plugin_manager` return `ambiguous-install` (its fallback matching does not recognise `link:<path>`). This is `plugin_manager`'s matching behaviour, not a problem with this plugin; the first installation is unaffected, and if you hit it, `remove_bundle` first and then `install_bundle` again.
+- **The terminal command's launcher lives inside DSH's installation directory** (`resources\runtime\cli\bin`, the directory holding `dsh.cmd`). **A client upgrade may remove it**; if `quit-dsh` disappears after an upgrade, double-click `install-dsh-quit.cmd` once to restore it — the status line on the configuration page will also say "not installed yet".
+- **The terminal command is a separate program and needs a running client.** With no client running it only says so; there is nothing it can queue up in advance. It also needs the desktop shell to carry the quit patch (see "Why a desktop-shell patch is still needed"): without it the plugin answers "当前 Host 没有桌面退出通道".
+- **This plugin never overwrites someone else's file.** A terminal command name that collides with an existing file is refused at save time; the launcher install removes only files carrying this plugin's marker; and `uninstall-dsh-quit.cmd` never touches a same-named file you created yourself.
 - Interoperability note regarding DSH: the tool scripts quote verbatim a small number of strings taken from DeepSeek Harness's own `app.asar` — several anchor code lines and one comment in `tools\patch-asar.mjs`, and one function signature in `tools\verify-shell.mjs`. They serve precise editing and verification only and nothing else. DeepSeek Harness is MIT-licensed (<https://github.com/deepseek-ai/deepseek-harness>), and the copyright of those quoted strings remains with its original author.
 
 ## License
