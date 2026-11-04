@@ -4,6 +4,8 @@
 
 **Plugin name**: `dsh-command-quit`
 
+**Version**: `1.4.0`
+
 Adds two ways to close the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) desktop client: the slash command `/quit-dsh` in the conversation box, and **`quit-dsh` in any terminal window**. **Both names are configurable**, and the terminal command can be set to ask before it quits.
 
 **Disclosure**: **This plugin was written entirely by DeepSeek V4.1 Flash (including this README file itself). The uploader only ran basic functional tests and did not review the code line by line**, so unknown bugs may exist.
@@ -59,7 +61,7 @@ Open the **Plugins** page from the left sidebar of the DSH interface (the "Plugi
 2. Wait for "安装完成", then close that window.
 3. **Open a new terminal** (an already-open one does not know the new command yet) and type `quit-dsh`.
 
-Installing does exactly one thing: it writes two tiny files into **the command directory DSH already keeps on your PATH** — the directory that holds `dsh.cmd`. It **does not modify the client's files and needs no administrator rights**, and it can run while the client is open.
+Installing the terminal command writes two tiny files into **the command directory DSH already keeps on your PATH** — the directory that holds `dsh.cmd`. It **needs no administrator rights**, and it can run while the client is open. The same script also applies the quit patch to your client and remembers where the client is installed (see "Making it take effect" below).
 
 ### What it looks like
 
@@ -144,53 +146,26 @@ Installation is performed by DSH's built-in `plugin_manager`, which runs `pnpm a
 
 ### Making it take effect
 
-**Installing the plugin is not the whole story — you must also patch the client shell once, and then restart the client.**
-
-Your own `app.asar` (the client installation file) has no "Host → shell" quit channel, so the plugin needs a small patch as well; see the next section, "Why a desktop-shell patch is still needed". The patch script applies only once per version; running it repeatedly causes no problems.
-
-There are two ways to apply the patch; pick one:
-
-- **If you would rather not use the command line**: double-click `fix-quit.cmd`. It first checks whether the client is closed, then repairs everything automatically and prints a conclusion in Chinese.
-- **Using the command line**:
-
-  ```powershell
-  node tools\patch-asar.mjs --apply
-  ```
-
-**Then restart the desktop client once.** The profile's bundle list is read at startup, and the shell patch is loaded when the Electron main process starts. After the restart the default `/quit-dsh` is available (the command name can be changed at any time on the plugin configuration page, and takes effect immediately without another restart).
-
-## Why a desktop-shell patch is still needed
-
-The command's handler runs inside the Host child process, and the Host is a child process that the Electron shell spawns over IPC. Some DSH versions only have "shell → Host" control messages (`shutdown` / `quit-inspection` / `update-tasks`); they have no "Host → shell" quit channel and expose no quit API to plugins. Clicking the window's X merely `hide()`s to the tray, which is not the same as quitting.
-
-This plugin therefore ships a minimal `app.asar` patch that does three things:
-
-1. `isDesktopHostEvent()` admits the new message `{ type: "quit-request" }`;
-2. a branch is added to the Host message handler → `app.quit()` (reusing the native quit flow and confirmation dialog);
-3. `DSH_DESKTOP_QUIT_REQUEST=1` is injected into the Host child process so the plugin can tell whether the shell supports this channel at all.
-
-Point 3 is a safety valve: if the patch is ever lost (for example when a client upgrade overwrites `app.asar`), the plugin cannot read that environment variable and returns a clear error message instead of sending an unknown message to the shell (**which** would make the shell treat it as a protocol error and kill the Host).
-
-The patch is an **in-place, equal-length write**: the byte count of `lib/main.js` does not change, and the asar header and the offsets of all other files stay exactly as they were, so there is no risk of the archive being repacked. The script also runs a "reversibility proof" internally — it restores the four edited spots in memory one by one and requires the result to be byte-for-byte identical to the original; otherwise it refuses to write. This mechanism guarantees:
-
-- **Either the patch is applied completely, or nothing is touched.** The script first verifies that the four changes are either all present or all absent; a half-patched archive is refused with advice to restore first, and a half-finished state is never mistaken for "already fixed".
-- **There is verification before and after writing.** Before writing, the backup is copied to a temporary file, compared byte by byte, and only renamed into place once confirmed; after writing, the content is read back and compared to confirm that all four changes are really there. Failing any step produces a clear error and tells you how to restore.
-- **Even if something does go wrong, there is a clean backup to restore from.** An extreme case (a power failure mid-write, for instance) can still leave an incomplete archive; the script detects that and refuses to continue on top of it. In that situation, restore from the backup with `node tools\unpatch-asar.mjs --apply`. Before restoring, the script also confirms that the backup itself is intact and genuinely free of the patch.
+Once the plugin is installed there is one more step: **apply the "quit patch" to the client**. The easiest way is to double-click **`install-dsh-quit.cmd`** in the plugin folder — it was written to install the terminal command, and now also finds your client, applies the patch and remembers where the client is installed. If you do not want the terminal command and only need `/quit-dsh`, run this once in the plugin folder:
 
 ```powershell
-# First see what the patch would do (changes no files)
 node tools\patch-asar.mjs
-
-# Apply the patch
-node tools\patch-asar.mjs --apply
-
-# Behaviour sampling: with quit-request removed, the other sampled messages are judged as in the original
-node tools\verify-shell.mjs
 ```
 
-For non-technical users: double-click `fix-quit.cmd`. It first confirms that the client is closed (its files cannot be changed while the client is running), then runs everything automatically and prints a Chinese conclusion. The launcher looks for a system-installed Node.js first, falls back to the Node bundled with DeepSeek Harness, and only if neither exists does it ask you to install one.
+Then **restart the desktop client once**. The profile's bundle list is read when the client starts, so a freshly installed plugin also takes effect only after that restart. Afterwards the default `/quit-dsh` works (the command name can be changed at any time on the plugin configuration page, and takes effect immediately without another restart).
 
-## Upgrading the plugin (1.1.0 → 1.2.2)
+The patch status can be checked at any time:
+
+```powershell
+node tools\patch-asar.mjs --check     # patched / unpatched / unknown
+node tools\patch-asar.mjs --revert    # restore the shipped bytes
+```
+
+**Since 1.4.0, `/quit-dsh` needs the client patched once.** The desktop client accepts only a fixed set of messages from child processes and treats every other one as an error: it reports `dsh desktop host sent an invalid IPC event`, kills the process doing the work, and then shows an "application failed to start or stopped unexpectedly" window. The plugin therefore **checks whether the client is patched before it sends anything**: if it is not, it answers with a single sentence and sends nothing, so it **never crashes the client again**.
+
+The patch changes two statements inside the client's `app.asar`, and **the file size does not change by a single byte afterwards** (so the client's own integrity check stays valid). It can also be restored exactly with one command. The client has to be restarted after patching. A client upgrade replaces `app.asar`, which removes the patch — at that point run `install-dsh-quit.cmd` or `node tools\patch-asar.mjs` once more; until then `/quit-dsh` only answers "not patched yet" and does not crash.
+
+## Upgrading the plugin
 
 If you already run an older version, the upgrade has three steps — **the terminal command is new in 1.2.x, so replacing the plugin files alone is not enough.**
 
@@ -201,11 +176,21 @@ If you already run an older version, the upgrade has three steps — **the termi
    install_bundle github:Noobboi-22401/dsh-command-quit
    ```
 
-2. **Install the terminal command once.** Open the plugin folder and double-click **`install-dsh-quit.cmd`**.
+2. **Install the terminal command once** (only needed on 1.2.x or earlier; skip this if you already installed it). Open the plugin folder and double-click **`install-dsh-quit.cmd`**.
 
 3. **Restart the client.** Afterwards `/quit-dsh` works as before, and the terminal gains a `quit-dsh` command.
 
 > If you already installed the terminal command earlier (say, a test build), **do not delete anything by hand**: the plugin recognises the launcher files it wrote by their *generation* and replaces an older one automatically.
+
+### What 1.4.0 changes
+
+- **The quit command works again.** 1.3.0 judged that "the client ships an official quit message, so its installation files never need patching" — **that judgement was wrong**: that message only travels downward from the client to its child processes, and a plugin sending it upward is treated by the client as an invalid event, which ends in a crash window. 1.4.0 goes back to "patch the client", but adds two safeguards 1.2.x did not have: the patch is a **byte-length-preserving rewrite** (the file size is unchanged and one command restores it exactly), and **the patch is confirmed before anything is sent** (if it is missing, the plugin only answers with one sentence and sends no message, so the crash cannot happen again).
+- **New `tools\patch-asar.mjs`**: with no argument it applies the patch (and does nothing if it is already applied); `--check` only reports the status, and `--revert` restores the shipped bytes.
+- **The install script applies the patch and remembers the client location**: double-clicking `install-dsh-quit.cmd` now not only installs the terminal command but also finds your client, applies the patch and stores that location for next time, so an installation in an unusual directory (such as `D:\Apps\DeepSeek Harness`) needs no path from you.
+
+### What 1.3.0 changes (withdrawn — please upgrade to 1.4.0)
+
+- 1.3.0 said "the client no longer needs patching; just use the client's own official quit message". **That was wrong**, and following it makes the client show a crash window when it quits. 1.4.0 has gone back to patching the client and guarantees that crash no longer happens.
 
 ### What 1.2.2 changes
 
@@ -217,52 +202,45 @@ If you already run an older version, the upgrade has three steps — **the termi
 
 ## After a client upgrade
 
-An upgrade replaces `app.asar`, so the shell patch is lost with it. The plugin itself is unaffected: the command then returns a clear error message instead of crashing or failing silently.
+**From 1.4.0 on: the patch has to be applied once more.** A client upgrade replaces `app.asar`, which removes the patch, and `/quit-dsh` answers "this client has not been patched for quitting" — **it does not crash**. The fix is to double-click `install-dsh-quit.cmd` once (it finds the client and re-applies the patch), then restart the client.
 
-Simply apply the patch again (idempotent — an already patched archive is skipped):
-
-```powershell
-node tools\patch-asar.mjs --apply
-```
+**The terminal command's launcher is also written into DSH's installation directory**, and a client upgrade may remove it. If `quit-dsh` disappears after an upgrade, double-click `install-dsh-quit.cmd` once more (the status line on the configuration page will also say "not installed yet").
 
 ## Uninstallation
 
-1. Restore the shell (close the client first):
-   ```powershell
-   node tools\unpatch-asar.mjs --apply
-   ```
-   It first confirms that the backup is intact and genuinely free of the patch, and after restoring it reads the content back for verification. If the backup file is missing or obviously incomplete, it refuses to run rather than risk a write.
-2. Remove the plugin (using the in-application plugin_manager, equivalent to clicking uninstall in the interface):
+1. Remove the plugin (using the in-application plugin_manager, equivalent to clicking uninstall in the interface):
    ```
    remove_bundle  dsh-command-quit
    ```
-3. Restart the client.
+2. Restart the client.
+3. If you installed the terminal command and want it gone too, double-click **`uninstall-dsh-quit.cmd`** (it deletes only the two files carrying this plugin's marker, and you can always reinstall it from the configuration page).
+
+**The patch only changes two statements in the client's `app.asar`, and the file size stays the same.** On a normal uninstall, `uninstall-dsh-quit.cmd` reverts the patch automatically (it takes effect the next time the client starts). If the plugin directory has already been deleted, the manual revert command is `node tools\patch-asar.mjs --revert`, run **in a directory that still holds a copy of this plugin**; the client never becomes unusable because of the patch — the worst case is a leftover extra check that accepts `quit-request`.
 
 ## Path configuration
 
-The scripts under `tools/` contain **no hard-coded absolute paths**. They locate the installation in the following order:
+The terminal command's installer decides "where to write the launcher files" in the following order, and contains **no hard-coded absolute paths**:
 
 | Environment variable | Purpose |
 |---|---|
-| `DSH_APP_ASAR` | absolute path of the desktop client's `resources\app.asar` |
-| `DSH_DESKTOP_EXE` | absolute path of the desktop client executable |
-| `DSH_DESKTOP_RESOURCES` | the `resources` directory inside the installation |
-| `DSH_PROFILE_DIR` | the DSH profile directory |
-| `DSH_HOME` | the DSH home directory (default `~/.dsh`) |
 | `DSH_COMMAND_DIR` | where the terminal command is installed (default: the directory holding `dsh.cmd`, found automatically) |
 | `DSH_COMMAND_QUIT_STATE` | the terminal feature's state directory (default `~/.dsh-command-quit`) |
 | `DSH_COMMAND_QUIT_TRANSPORT` | force the relay transport: `pipe` (named pipe) / `tcp` (loopback port) / `auto` (default) |
+| `DSH_HOME` | the DSH home directory (default `~/.dsh`) |
+
+A few developer-facing helpers under `tools/` (`profile-check.mjs` and friends) locate the client with these variables:
+
+| Environment variable | Purpose |
+|---|---|
+| `DSH_APP_ASAR` | absolute path of the desktop client's `resources\app.asar` (used both for patching and for reading information) |
+| `DSH_COMMAND_QUIT_CHANNEL` | diagnostics and tests only: forces the "is the client patched" answer (`patched` / `unpatched` / `unknown`); do not set it in normal use |
+| `DSH_DESKTOP_EXE` | absolute path of the desktop client executable |
+| `DSH_DESKTOP_RESOURCES` | the `resources` directory inside the installation |
+| `DSH_PROFILE_DIR` | the DSH profile directory |
 
 If none is set, the scripts search the conventional install locations (`%LOCALAPPDATA%\Programs\DeepSeek Harness\resources` and so on); when nothing is found they report a clear error telling you which variable to set.
 
-**Note: an explicitly set variable has the highest priority, and the path must really exist.** If `DSH_APP_ASAR` points at a non-existent location, the script **stops with an error** instead of quietly falling back to another installation found automatically — this avoids patching the wrong client. For the same reason, when searching automatically for the desktop executable the script will not mistake an uninstaller inside the install directory (such as `Uninstall DeepSeek Harness.exe`) for the client.
-
-For example, when the installation is in an unusual location:
-
-```powershell
-$env:DSH_APP_ASAR = '<your install directory>\DeepSeek Harness\resources\app.asar'
-node tools\patch-asar.mjs --apply
-```
+**Note: an explicitly set variable has the highest priority, and the path must really exist.** If `DSH_APP_ASAR` points at a non-existent location, the script **stops with an error** instead of quietly falling back to another installation found automatically — this avoids inspecting the wrong client. For the same reason, when searching automatically for the desktop executable the script will not mistake an uninstaller inside the install directory (such as `Uninstall DeepSeek Harness.exe`) for the client.
 
 ## Directory structure
 
@@ -270,10 +248,11 @@ node tools\patch-asar.mjs --apply
 dsh-command-quit/
 ├── package.json            # npm package manifest (with the dsh.bundle.patch and dsh.client declarations)
 ├── cordis.patch.yml        # bundle mount declaration: insert command-quit
-├── .gitignore              # ignores node_modules, patch backups, etc.
+├── .gitignore              # ignores node_modules, etc.
 ├── lib/
 │   ├── index.js            # plugin core (Host half): command registration, command-name validation, save interception and runtime re-check
 │   ├── client.js           # browser half: plugin configuration page (two names + two switches) + conflict notices
+│   ├── shell-channel.js    # the client quit channel: byte-length-preserving patch, status detection, apply / revert
 │   ├── terminal-state.js   # on-disk state of the terminal feature: instance records and the settings snapshot
 │   ├── quit-channel.js     # the local relay: named pipe / loopback port + random token
 │   ├── terminal-install.js # PATH scanning, launcher install / rename / removal
@@ -285,16 +264,13 @@ dsh-command-quit/
 │   └── dsh-quit            # POSIX launcher (Git Bash and friends)
 ├── tools/
 │   ├── dsh-paths.mjs       # shared path resolution (environment variables / conventional install locations)
-│   ├── patch-asar.mjs      # applies the equal-length shell patch to app.asar
-│   ├── unpatch-asar.mjs    # restores the shell from the backup
-│   ├── verify-shell.mjs    # behaviour-sampling test for the shell patch
 │   ├── profile-check.mjs   # verifies that the profile composes this plugin correctly
-│   ├── install-dsh-quit.mjs # installs / removes the terminal command (Chinese-message layer)
+│   ├── install-dsh-quit.mjs # installs / removes the terminal command (applies the patch too, Chinese-message layer)
+│   ├── patch-asar.mjs      # applies / checks / reverts the client quit patch
 │   ├── test-command.mjs    # end-to-end IPC test of the command + configuration tests for both names (Host half)
 │   ├── test-client.mjs     # structural test of the configuration page (browser half)
-│   ├── test-terminal.mjs   # end-to-end test of the terminal command (relay, question, launcher files)
-│   └── fix-desktop-quit.mjs # Chinese-message layer of the one-click repair
-├── fix-quit.cmd            # Windows double-click entry point: repair the shell patch (locates Node automatically: system first, then the one bundled with DSH)
+│   ├── test-patch.mjs      # tests the patch itself (same length, exact restore, unrecognised builds refused)
+│   └── test-terminal.mjs   # end-to-end test of the terminal command (relay, question, launcher files)
 ├── install-dsh-quit.cmd    # Windows double-click entry point: install the terminal command
 ├── uninstall-dsh-quit.cmd  # Windows double-click entry point: remove the terminal command
 ├── README.md
@@ -306,35 +282,35 @@ dsh-command-quit/
 
 ## Compatibility
 
-- **Platform**: the desktop-shell patch is written for the **Windows** packaging format of DeepSeek Harness (`resources\app.asar`, `.exe` entry point). The plugin core (`lib/index.js`) is itself cross-platform, but it depends on the shell providing the `DSH_DESKTOP_QUIT_REQUEST` channel.
-- **macOS / Linux not verified**: this plugin has only been developed and tested on one Windows machine, against the Windows build of DeepSeek Harness. The author **does not know whether this plugin is compatible with macOS or Linux**, and has done no verification on those systems. The plugin core (`lib/`) contains no platform-specific code and does not in principle exclude other systems, but the desktop-shell patch and the double-click entry point (see the previous bullet and the notes below) are written for Windows only. Please evaluate and test it yourself on other systems, and do not assume it works there.
-- **DSH version**: verified on desktop builds such as `0.2.0-rc.2`. `patch-asar.mjs` depends on several anchor strings inside `lib/main.js`; when a DSH version change makes an anchor disappear, the script reports `anchor not found` and **refuses to write**, rather than writing half a bad patch. An archive whose structure does not match (not an asar, truncated, or `lib/main.js` missing) produces the same clear error instead of an English stack trace.
+- **Platform**: the plugin core (`lib/`) is **cross-platform** and contains no operating-system-specific code. The "close the desktop client" feature, however, depends on the IPC channel between the Host child process and the desktop shell, so it **only works while running inside the desktop client** (a Host started straight from a terminal has no such channel and the command says so plainly). Development and testing remain **Windows**-first.
+- **macOS / Linux not verified**: this plugin has only been developed and tested on one Windows machine, against the Windows build of DeepSeek Harness. The author **does not know whether this plugin is compatible with macOS or Linux**, and has done no verification on those systems. The plugin core (`lib/`) contains no platform-specific code and does not in principle exclude other systems, but the double-click entry points (`install-dsh-quit.cmd` / `uninstall-dsh-quit.cmd`) and parts of the messages are written for Windows only. Please evaluate and test it yourself on other systems, and do not assume it works there.
+- **DSH version**: verified on desktop builds such as `0.2.0-rc.2` and `0.2.1-rc.5` (Electron 44.x). The patch anchors on two specific statements in the client's `lib/main.js`, so **a major version bump may no longer match**; when it does not, the patch tool refuses to change anything and says why, and the command merely answers "not patched yet" instead of damaging the client.
 - **Configuration menu**: the command name is configured through DSH's own plugin configuration page (the Host half declares `Config`, and the browser half `lib/client.js` registers the configuration page). It requires the DSH composition to include `@deepseek-ai/dsh-client-ui-settings`, `@deepseek-ai/dsh-client-ui-plugin-manager` and `@deepseek-ai/dsh-client-ui-primitives` (the source of the shared controls the configuration card uses), plus `react` (shipped with the DSH frontend) — all four are provided by the DSH host and present by default in official desktop builds, so nothing has to be installed separately; `package.json` marks them as optional peer dependencies (`peerDependenciesMeta.optional`). Without the browser half, the plugin core still loads but no configuration page appears in the interface. This entry point is a **public mechanism provided by DSH**; this plugin is merely a user of it, and the bottom of the configuration panel also states that it is "unofficial". Once again: **this plugin has no relationship whatsoever with DeepSeek.**
 - **Save interception**: collision interception relies on DSH dispatching the `internal/config` hook before writing the profile patch (the save path of `dsh-config-editor`). This plugin recognises that save in two independent ways — "its own fiber" and "its own profile entry id" — and either hit is enough. The scope that gets checked is the **global layer plus every known session/preset scope in the registry** (DSH's `/compact`, `/goal` and `/plan` hide in scoped layers, so a global-only check would miss them). If some DSH version does not expose scopes (leaving only the global check), a saved name that is unavailable at startup still falls back automatically to the default name `/quit-dsh`, so the quit command never stops working.
 - **Fallback and notice when the name is taken away**: the plugin also listens to DSH's `commands/change` event (dispatched on every command addition or removal in the registry, and forwarded to the browser as well). After every change it re-confirms "does the currently registered name still belong to me in every scope" — it recognises itself by the stable identity written at registration time (`definitionId`, a public field of the DSH command registry, unrelated to display text); only when the registry of the running environment does not return that field does it fall back to comparing the command description (with leading and trailing whitespace normalized). So its own global registration is never misread as a conflict, and a description rewritten by DSH does not affect the judgement. As soon as it is covered by someone else, the plugin switches back to the default name automatically and writes the reason into its own configuration entry (the `notice` field). The browser half reads it through the `settings/document-updated` event forwarded by DSH, renders red text on the configuration page, and registers a `shell.overlay` entry that pops a banner at the bottom of the interface. If some DSH version does not forward that event or has no `shell.overlay` slot, the worst case is that the notice cannot be displayed, and **the automatic fallback of the command itself is unaffected**.
 - **Fault tolerance of the browser half**: the `shell.overlay` slot that holds the bottom banner is **the very layer the settings dialog lives in**, so if that component threw during rendering it would take the settings page down with it. Three layers of isolation were therefore built in: the settings page is registered **first** and the banner **last**, each with its own error containment; the banner keeps its own state and does not rely on "slot injection" to pass data into the component; and neither component ever throws — a failed render degrades into a line of text on the page and records the failure in the browser's `localStorage` under the `dsh-command-quit:diag` key, which you can read directly when investigating.
 - **The contract for reading state on the configuration page**: DSH uses React's `useSyncExternalStore` to turn the data source in "slot injection" into component props, and that channel requires `getSnapshot()` to **return the same object whenever the data has not changed**. As long as two consecutive reads differ by reference, React re-renders endlessly and eventually drags the plugin page down along with the settings page; the symptom is **the configuration menu refusing to open or showing a blank page, with no error on the page at all**. The card in this plugin therefore uses the form's own binding (`SettingsFormModel.bind`, the same approach as the official settings pages) as its data source, wrapped in a structural-comparison cache, giving two guarantees that reads are stable; `tools/test-client.mjs` contains a dedicated regression check watching for this.
-- **Node.js**: `>=18` (the build artifacts use ESM, top-level await and `node:`-prefixed imports). The double-click entry point `fix-quit.cmd` first looks for `node.exe` on the system `PATH` (and actually runs it once to confirm it works); if it is not found it automatically falls back to the Node bundled with DeepSeek Harness (located via `DSH_HOME`, `DSH_APP_ASAR` and the conventional install locations), so **a machine without a separately installed Node.js can still use it by double-clicking**.
-- **Host shape**: the command can only really quit inside a desktop client that has the quit channel. Executing it in a pure Web / server-side Host returns a clear error message rather than failing silently.
+- **Node.js**: `>=18` (the build artifacts use ESM, top-level await and `node:`-prefixed imports). The terminal command's launchers (the files under `bin\` and the two written onto PATH at install time) try, in order: the Node recorded at install time, then `node.exe` on the system `PATH` (actually run once to confirm it works), then the Node bundled with DeepSeek Harness — so **a machine without a separately installed Node.js can still use it**.
+- **Host shape**: the command can only really quit when running inside the desktop client. Executing it in a pure Web / server-side Host returns a clear message ("当前 Host 不是由桌面客户端启动的") rather than failing silently.
 - **The terminal command's relay**: a Windows named pipe is preferred (the operating system never exposes it to the network), falling back automatically to a `127.0.0.1` loopback port where creating a pipe is not permitted. In loopback mode the server checks the peer address and drops anything that is not this machine; both modes require the per-process random token from the instance record, compared in constant time so the comparison leaks nothing. While the feature is off **nothing is listening at all**: "off" means no socket, not a refused request.
-- **The terminal command's launcher files**: installed into the directory DSH already keeps on PATH (the one holding `dsh.cmd`). On Windows both `<name>.cmd` (for cmd / PowerShell / Windows Terminal) and the extension-less `<name>` (for Git Bash and similar shells) are written; on macOS / Linux the extension-less one. Both carry this plugin's marker, and renaming or uninstalling **touches only marked files**. The launcher in `bin\` tries, in order: the Node recorded at install time, then `node.exe` on PATH (actually run once to confirm it works), then the Node bundled with DSH — so a machine without a separately installed Node.js still works.
+- **The terminal command's launcher files**: installed into the directory DSH already keeps on PATH (the one holding `dsh.cmd`). On Windows both `<name>.cmd` (for cmd / PowerShell / Windows Terminal) and the extension-less `<name>` (for Git Bash and similar shells) are written; on macOS / Linux the extension-less one. Both carry this plugin's marker, and renaming or uninstalling **touches only marked files**.
 - **The terminal command's collision check**: both saving and installing scan **the whole PATH**, counting `<name>` plus every `.cmd`, `.bat`, `.exe`, `.ps1`, `.com` and `.vbs` spelling, and letting through only files carrying this plugin's marker. Windows reserved device names (`con`, `nul`, `com1`, …) are refused as well.
 - **How the terminal command and the configuration page stay in step**: the plugin publishes its status into the `terminalNotice` field of its own configuration entry, and the browser half renders it as the status line from the settings-update event DSH forwards. On a DSH build that does not forward that event the worst case is a status line that does not refresh, and **the command itself keeps working**. Renaming and both switches take effect immediately, with no client restart.
 
 ## Notes
 
-- Patching **modifies DeepSeek Harness's installation file** (`app.asar`). The script creates an `app.asar.quit-patch-backup` backup before the first patch (the original file is only changed after the backup has been written and verified); to uninstall, use `unpatch-asar.mjs --apply` rather than deleting files by hand.
-- **Close the client before patching or restoring.** The client holds `app.asar` open while running, so the script cannot write safely; `fix-quit.cmd` checks this itself and asks you to quit first.
-- The patch is lost after every client upgrade and must be applied again (idempotent, safe to repeat).
-- **This plugin is not an official DeepSeek plugin.** It calls DSH's own plugin configuration entry point and plugin registration service; the plugin itself has nothing to do with DeepSeek. Please assess the consequences of modifying the client's installation files yourself; if the client offers an official quit API, prefer the official approach.
+- **This plugin modifies the `app.asar` inside the client's installation directory** (since 1.4.0; 1.3.0 claimed it "changed no file", and that claim was wrong). The change is **byte-for-byte equal in length**, affects only two statements, and can be restored exactly with `--revert`, but it is still a modification of the client's installation file, and **it has to be redone after every client upgrade**. If you do not want that change, this plugin has no reason to exist — better not to use it.
+- **This plugin is not an official DeepSeek plugin.** It calls DSH's own plugin configuration entry point, plugin registration service, and the client's own quit path (`app.quit()`); the plugin itself has nothing to do with DeepSeek.
 - **Command-name collisions are intercepted "at save time".** The check happens before the configuration is written: a collision rejects the save outright, the panel shows red text, the configuration is not written and the command is not switched. To verify this, try one of DSH's own names (such as `compact`): the collision is refused at the moment you press save.
 - **Collisions that cannot be detected at save time are caught and reported at runtime.** If another plugin registers a command of the same name only after a particular session starts, it is invisible at the moment of saving; the plugin re-checks whenever the command table changes, and once covered it switches back to `/quit-dsh` automatically and explains why in **red text on the configuration page** and in a **banner at the bottom of the interface**. This notice has to travel through DSH's settings push to appear, so **after restarting the client** an ongoing conflict shows up again.
 - Known leftover issue: running `install_bundle` again for an **already existing** local path dependency may make `plugin_manager` return `ambiguous-install` (its fallback matching does not recognise `link:<path>`). This is `plugin_manager`'s matching behaviour, not a problem with this plugin; the first installation is unaffected, and if you hit it, `remove_bundle` first and then `install_bundle` again.
-- **The terminal command's launcher lives inside DSH's installation directory** (`resources\runtime\cli\bin`, the directory holding `dsh.cmd`). **A client upgrade may remove it**; if `quit-dsh` disappears after an upgrade, double-click `install-dsh-quit.cmd` once to restore it — the status line on the configuration page will also say "not installed yet".
-- **The terminal command is a separate program and needs a running client.** With no client running it only says so; there is nothing it can queue up in advance. It also needs the desktop shell to carry the quit patch (see "Why a desktop-shell patch is still needed"): without it the plugin answers "当前 Host 没有桌面退出通道".
+- **The terminal command's launcher lives inside DSH's installation directory**. **A client upgrade may remove it**; if `quit-dsh` disappears after an upgrade, double-click `install-dsh-quit.cmd` once to restore it — the status line on the configuration page will also say "not installed yet".
+- **The terminal command is a separate program and needs a running client.** With no client running it only says so; there is nothing it can queue up in advance.
 - **This plugin never overwrites someone else's file.** A terminal command name that collides with an existing file is refused at save time; the launcher install removes only files carrying this plugin's marker; and `uninstall-dsh-quit.cmd` never touches a same-named file you created yourself.
-- Interoperability note regarding DSH: the tool scripts quote verbatim a small number of strings taken from DeepSeek Harness's own `app.asar` — several anchor code lines and one comment in `tools\patch-asar.mjs`, and one function signature in `tools\verify-shell.mjs`. They serve precise editing and verification only and nothing else. DeepSeek Harness is MIT-licensed (<https://github.com/deepseek-ai/deepseek-harness>), and the copyright of those quoted strings remains with its original author.
+- Interoperability note regarding DSH: the plugin talks to the desktop shell over Node IPC. The event name `quit-request` it uses is **new in this plugin**, and only takes effect after `tools\patch-asar.mjs` adds two checks inside the client shell: one adds it to the list of events a child process may send, the other makes it call the client's own `app.quit()` (so the official confirmation dialog still appears while tasks are running). The plugin **copies none of the client's internal code verbatim**, and does not modify any DSH source repository. DeepSeek Harness is MIT-licensed (<https://github.com/deepseek-ai/deepseek-harness>).
 
 ## License
 
 [MIT](LICENSE)
+
+Copyright (c) 2026 Noobboi-22401

@@ -13,8 +13,10 @@ rem   1. node.exe on PATH (a separately installed Node.js, needs v18 or newer)
 rem   2. a Node build bundled with DeepSeek Harness
 rem   3. nothing found -> explain how to fix it and exit
 rem
-rem The client does NOT have to be closed: this only writes a launcher into
-rem DSH's own command directory, never into the client's files.
+rem The client does not have to be closed: the launcher is written into DSH's own
+rem command directory, and the quit patch is applied to resources\app.asar, which
+rem the client only reads while starting. The patch takes effect the next time the
+rem client starts, so restart it afterwards.
 rem ---------------------------------------------------------------------------
 
 set "TOOL=%~dp0tools\install-dsh-quit.mjs"

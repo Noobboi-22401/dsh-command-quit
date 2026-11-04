@@ -21,8 +21,10 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { applyPatch, revertPatch } from '../lib/shell-channel.js'
 import { installShim, isOnPath, findCommandDir, removeShim, resolveNodeCommand, scanConflicts, validateTerminalName } from '../lib/terminal-install.js'
 import { DEFAULT_TERMINAL_NAME, readSettings, writeSettings } from '../lib/terminal-state.js'
+import { resolveAppAsar } from './dsh-paths.mjs'
 
 const PLUGIN_DIR = path.resolve(fileURLToPath(new URL('..', import.meta.url)))
 
@@ -57,6 +59,58 @@ function nodeCommand() {
 }
 
 /**
+ * The client archive the quit channel lives in.
+ *
+ * Three sources, best first: `DSH_APP_ASAR` or a conventional install location
+ * (`tools/dsh-paths.mjs`), then the path the running plugin recorded in its own
+ * state — which is how a client installed in an unusual place, like this user's
+ * `D:\\Apps\\DeepSeek Harness`, is found without asking anyone to type a path.
+ *
+ * @returns the archive path, or `undefined` when none could be found.
+ */
+function clientArchive() {
+  try {
+    return resolveAppAsar()
+  } catch {
+    const stored = readSettings().appAsar
+    return typeof stored === 'string' && stored.length > 0 && fs.existsSync(stored) ? stored : undefined
+  }
+}
+
+/**
+ * Apply the shell patch, reporting the outcome instead of throwing.
+ * @returns `{ ok, changed, archive, detail }`.
+ */
+function applyShellPatch() {
+  const archive = clientArchive()
+  if (archive === undefined) {
+    return { ok: false, detail: '找不到客户端的 app.asar（也就是 DeepSeek Harness 安装目录里的 app.asar）' }
+  }
+  try {
+    const result = applyPatch(archive)
+    return { ok: true, changed: result.changed, archive }
+  } catch (error) {
+    return { ok: false, archive, detail: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+/**
+ * Undo the shell patch when the plugin is removed, so nothing of this plugin
+ * outlives it. Best effort: an unreadable archive is reported, never fatal.
+ * @returns `{ ok, changed, archive, detail }`.
+ */
+function revertShellPatch() {
+  const archive = clientArchive()
+  if (archive === undefined) return { ok: false, detail: '找不到客户端的 app.asar' }
+  try {
+    const result = revertPatch(archive)
+    return { ok: true, changed: result.changed, archive }
+  } catch (error) {
+    return { ok: false, archive, detail: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+/**
  * The name to install under, and where it came from.
  *
  * The published configuration wins over the built-in default because the user
@@ -86,6 +140,17 @@ function report(result) {
     ''
   ]
   for (const file of result.files) lines.push(`  已写入：  ${file}`)
+  lines.push('')
+  if (result.patch.ok) {
+    lines.push(result.patch.changed ? '  已给客户端打上退出补丁。' : '  客户端的退出补丁本来就在，无需改动。')
+    lines.push('  客户端如果正在运行，请完全退出再重新打开，补丁才会生效。')
+  } else {
+    lines.push('  注意：没能给客户端打上退出补丁，所以退出命令暂时还不会生效。')
+    lines.push(`  原因：${result.patch.detail}`)
+    lines.push('  如果客户端装在非常规位置，可以先指定它：')
+    lines.push('    set DSH_APP_ASAR=D:\\你的\\DeepSeek Harness\\resources\\app.asar')
+    lines.push('  然后再双击一次 install-dsh-quit.cmd。')
+  }
   lines.push('')
   if (result.onPath) {
     lines.push('安装完成。请关掉这个窗口，重新打开一个终端，然后输入下面这一行试试：')
@@ -155,7 +220,8 @@ function install(args) {
       source: resolved.source,
       files: written.files,
       onPath: isOnPath(found.dir),
-      settingsEnabled: readSettings().terminalEnabled
+      settingsEnabled: readSettings().terminalEnabled,
+      patch: applyShellPatch()
     })
     return 0
   } catch (error) {
@@ -193,6 +259,17 @@ function uninstall() {
   }
   console.log('')
   console.log('  客户端的退出命令不受影响；终端里的这个命令已经没有了。')
+  const patch = revertShellPatch()
+  if (patch.ok) {
+    if (patch.changed) {
+      console.log('')
+      console.log('  已把客户端的退出补丁撤掉（客户端下次启动时生效）。')
+    }
+  } else {
+    console.log('')
+    console.log(`  退出补丁没有撤掉，客户端里的这一处改动还在：${patch.detail}`)
+    console.log('  如需手动还原，在插件目录运行：node tools\\patch-asar.mjs --revert')
+  }
   console.log('')
   return 0
 }

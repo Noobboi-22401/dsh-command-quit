@@ -12,7 +12,7 @@
 // plugin has no local copy the test extracts the two vendored packages from the
 // desktop `app.asar` and resolves them for the child only. Point DSH_APP_ASAR at
 // your install (see tools/dsh-paths.mjs) if discovery cannot find it.
-import { fork } from 'node:child_process'
+import { fork, spawn } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -50,13 +50,20 @@ function resolvesNatively(name) {
   }
 }
 
-/** Read one entry's bytes out of an Electron ASAR archive. */
+/**
+ * Read one entry's bytes out of an Electron ASAR archive.
+ *
+ * The header length lives at byte 12 of the archive's 16-byte prefix. Reading
+ * byte 4 instead picks up part of the pickle's length fields and lands 8 bytes
+ * short, which happens to survive the indexOf/lastIndexOf slice below — until a
+ * header whose first 8 bytes are not ASCII padding makes JSON.parse fail.
+ */
 function asarEntry(archive, entryPath) {
   const fd = fs.openSync(archive, 'r')
   try {
     const head = Buffer.alloc(16)
     fs.readSync(fd, head, 0, 16, 0)
-    const headerSize = head.readUInt32LE(4)
+    const headerSize = head.readUInt32LE(12)
     const raw = Buffer.alloc(headerSize)
     fs.readSync(fd, raw, 0, headerSize, 16)
     const text = raw.toString('utf8')
@@ -69,7 +76,7 @@ function asarEntry(archive, entryPath) {
     const size = Number(node.size ?? 0)
     const offset = Number(node.offset ?? 0)
     const content = Buffer.alloc(size)
-    fs.readSync(fd, content, 0, size, 8 + headerSize + offset)
+    fs.readSync(fd, content, 0, size, 16 + headerSize + offset)
     return content
   } finally {
     fs.closeSync(fd)
@@ -137,8 +144,6 @@ const makeVendorHook = ${makeVendorHook.toString()}
 const files = JSON.parse(filesJson)
 if (Object.keys(files).length > 0) registerHooks(makeVendorHook(files))
 
-if (scenario.desktop) process.env.DSH_DESKTOP_QUIT_REQUEST = '1'
-else delete process.env.DSH_DESKTOP_QUIT_REQUEST
 
 const plugin = await import(pathToFileURL(pluginPath).href)
 
@@ -343,7 +348,11 @@ if (scenario.shadowAfter !== undefined) {
   report.shadowErrors = errors.slice()
 }
 
-process.send?.(report)
+// A child with an IPC channel reports over it, exactly like the real Host. A
+// standalone child has no channel, so it writes the same report to stdout where
+// the parent can still read it.
+if (process.send === undefined) console.log('__REPORT__' + JSON.stringify(report))
+else process.send(report)
 `
 
 const childPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-quit-test-')), 'child.mjs')
@@ -355,15 +364,45 @@ function run(scenario) {
     // PATH, which is how a name that collides with someone else's command is
     // reproduced without depending on what happens to be installed.
     const env = { ...process.env }
+    // The client's patch state is read from the real installation by default, so
+    // a test would otherwise depend on whether the machine running it happens to
+    // have the patch applied. Pin it per scenario instead; `scenario.channel`
+    // overrides it for the refusal cases.
+    env.DSH_COMMAND_QUIT_CHANNEL = typeof scenario.channel === 'string' ? scenario.channel : 'patched'
     if (typeof scenario.pathPrefix === 'string' && scenario.pathPrefix.length > 0) {
       env.PATH = scenario.pathPrefix + path.delimiter + (env.PATH ?? '')
       env.Path = env.PATH
     }
-    const child = fork(childPath, [pluginPath, JSON.stringify(scenario), JSON.stringify(vendor.files)], { stdio: ['ignore', 'inherit', 'inherit', 'ipc'], env })
+    // The desktop shell IS the IPC channel: a Host spawned with one can ask its
+    // parent to quit, and one without it cannot. `scenario.standalone`
+    // reproduces the second case for real instead of faking a marker variable —
+    // and because `fork` always creates a channel, that case needs `spawn`.
+    //
+    // The plugin decides on `process.connected`, so the child must be started
+    // exactly as the desktop shell starts it: a Node process with an IPC channel
+    // (fork's default) versus a plain one (spawn).
+    const args = [childPath, pluginPath, JSON.stringify(scenario), JSON.stringify(vendor.files)]
+    const standalone = scenario.standalone === true
+    // A standalone child has no channel, so its report comes back on stdout.
+    const stdio = standalone ? ['ignore', 'pipe', 'inherit'] : ['ignore', 'inherit', 'inherit', 'ipc']
+    const child = standalone
+      ? spawn(process.execPath, args, { stdio, env })
+      : fork(childPath, args.slice(1), { stdio, env })
     const messages = []
+    let stdout = ''
+    if (standalone) child.stdout.on('data', (chunk) => { stdout += chunk })
     child.on('message', (message) => messages.push(message))
     child.on('error', reject)
-    child.on('exit', (code) => resolve({ code, messages }))
+    // One exit handler: `close` fires only after stdout has been fully drained,
+    // so the standalone report is always parsed before the result is resolved.
+    child.on('close', (code) => {
+      if (standalone) {
+        for (const line of stdout.split('\n')) {
+          if (line.startsWith('__REPORT__')) messages.push(JSON.parse(line.slice('__REPORT__'.length)))
+        }
+      }
+      resolve({ code, messages })
+    })
   })
 }
 
@@ -374,15 +413,22 @@ function check(label, condition, detail) {
 }
 
 // ---------------------------------------------------------------------------
-// Desktop shell: default name, one IPC quit-request, success.
+// Desktop shell: default name, one quit request, success.
 // ---------------------------------------------------------------------------
-const desktop = await run({ desktop: true })
+const desktop = await run({})
 const desktopReport = desktop.messages.find((m) => m && m.command !== undefined)
 const desktopControl = desktop.messages.filter((m) => m && m.type === 'quit-request')
 console.log('desktop report:', JSON.stringify(desktopReport))
 check('desktop child exits 0', desktop.code === 0, String(desktop.code))
-check('desktop sent exactly one quit-request', desktopControl.length === 1, JSON.stringify(desktopControl))
-check('quit-request has no extra fields', JSON.stringify(desktopControl[0]) === '{"type":"quit-request"}', JSON.stringify(desktopControl[0]))
+check('desktop sent exactly one quit request', desktopControl.length === 1, JSON.stringify(desktopControl))
+check('the quit request has no extra fields', JSON.stringify(desktopControl[0]) === '{"type":"quit-request"}', JSON.stringify(desktopControl[0]))
+// The shell kills the Host over an event it does not know, so the plugin must
+// never send anything else — and must not send this one to an unpatched client.
+check(
+  'no other control message is sent',
+  desktop.messages.every((m) => m === undefined || m.type === undefined || m.type === 'quit-request'),
+  JSON.stringify(desktop.messages.filter((m) => m && m.type !== undefined && m.type !== 'quit-request'))
+)
 check('default command name is quit-dsh', desktopReport?.command === 'quit-dsh', String(desktopReport?.command))
 check('handler reports success', desktopReport?.result?.kind === 'success', JSON.stringify(desktopReport?.result))
 check('plugin injects the commands service', JSON.stringify(desktopReport?.inject) === '["commands"]', JSON.stringify(desktopReport?.inject))
@@ -394,14 +440,48 @@ check(
 )
 
 // ---------------------------------------------------------------------------
-// No shell channel: no IPC traffic, a clear error instead.
+// A client whose shell does not accept the event yet: refuse, send nothing.
+// Sending anyway is what makes the shell kill the Host and show a crash window,
+// so "no traffic plus a sentence" is the whole point of this pair.
 // ---------------------------------------------------------------------------
-const web = await run({})
+const unpatched = await run({ channel: 'unpatched' })
+const unpatchedReport = unpatched.messages.find((m) => m && m.command !== undefined)
+check(
+  'an unpatched client receives no control message',
+  unpatched.messages.every((m) => m === undefined || m.type === undefined),
+  JSON.stringify(unpatched.messages.filter((m) => m && m.type !== undefined))
+)
+check(
+  'an unpatched client yields an error naming the patch tool',
+  unpatchedReport?.result?.kind === 'error' && String(unpatchedReport?.result?.text).includes('patch-asar'),
+  JSON.stringify(unpatchedReport?.result)
+)
+
+const unknownChannel = await run({ channel: 'unknown' })
+const unknownChannelReport = unknownChannel.messages.find((m) => m && m.command !== undefined)
+check(
+  'an unreadable patch state sends nothing either',
+  unknownChannel.messages.every((m) => m === undefined || m.type === undefined),
+  JSON.stringify(unknownChannel.messages.filter((m) => m && m.type !== undefined))
+)
+check(
+  'an unreadable patch state says so and offers --check',
+  unknownChannelReport?.result?.kind === 'error' && String(unknownChannelReport?.result?.text).includes('--check'),
+  JSON.stringify(unknownChannelReport?.result)
+)
+
+// ---------------------------------------------------------------------------
+// No shell channel (a Host started outside the desktop client): no IPC traffic,
+// a clear error instead.
+// ---------------------------------------------------------------------------
+const web = await run({ standalone: true })
 const webReport = web.messages.find((m) => m && m.command !== undefined)
 const webControl = web.messages.filter((m) => m && m.type !== undefined)
 console.log('web report    :', JSON.stringify(webReport))
 check('web child exits 0', web.code === 0, String(web.code))
-check('web sends no quit-request', webControl.length === 0, JSON.stringify(webControl))
+// A child without the channel cannot report over IPC, so its report arrives on
+// stdout instead; no control message may be sent.
+check('web sends no control message', webControl.length === 0, JSON.stringify(webControl))
 check('web handler reports a clear error', webReport?.result?.kind === 'error', JSON.stringify(webReport?.result))
 check('web error names the active command', typeof webReport?.result?.text === 'string' && webReport.result.text.includes('/quit-dsh'), String(webReport?.result?.text))
 
